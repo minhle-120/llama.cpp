@@ -547,6 +547,14 @@ struct server_slot {
 
             SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d\n", prompt.n_tokens(), truncated);
 
+            const auto moe_cache = llama_moe_cache_get_stats();
+            if (moe_cache.n_layers > 0) {
+                const uint64_t total = moe_cache.n_hit + moe_cache.n_miss;
+                SLT_INF(*this, "moe cache: layers = %d, slots = %d, hits = %" PRIu64 ", misses = %" PRIu64 ", hit rate = %.1f%% (cumulative)\n",
+                        moe_cache.n_layers, moe_cache.n_slots, moe_cache.n_hit, moe_cache.n_miss,
+                        total > 0 ? 100.0*moe_cache.n_hit/total : 0.0);
+            }
+
             t_last_used = ggml_time_us();
 
             state = SLOT_STATE_IDLE;

@@ -1587,6 +1587,15 @@ extern "C" {
         int32_t n_reused;   // number of times a ggml compute graph had been reused
     };
 
+    // [EXPERIMENTAL]
+    struct llama_moe_cache_stats {
+        uint64_t n_hit;
+        uint64_t n_miss;
+
+        int32_t n_layers;
+        int32_t n_slots;
+    };
+
     struct llama_perf_sampler_data {
         double t_sample_ms; // time needed for sampling in ms
 
@@ -1596,6 +1605,8 @@ extern "C" {
     LLAMA_API struct llama_perf_context_data llama_perf_context      (const struct llama_context * ctx);
     LLAMA_API void                           llama_perf_context_print(const struct llama_context * ctx);
     LLAMA_API void                           llama_perf_context_reset(      struct llama_context * ctx);
+
+    LLAMA_API struct llama_moe_cache_stats llama_moe_cache_get_stats(void);
 
     // NOTE: the following work only with samplers constructed via llama_sampler_chain_init
     LLAMA_API struct llama_perf_sampler_data llama_perf_sampler      (const struct llama_sampler * chain);

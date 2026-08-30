@@ -6,7 +6,6 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
-#include <cinttypes>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -45,8 +44,7 @@ struct moe_cache {
     int32_t n_slots     = 0;
     int32_t max_inserts = 2;
 
-    uint64_t clock   = 0;
-    uint64_t n_steps = 0;
+    uint64_t clock = 0;
 
     std::mutex mtx; // guards pending lists + clock (observe runs during graph exec)
 
@@ -331,6 +329,23 @@ const llama_moe_cache_layer * llama_moe_cache_lookup(const ggml_tensor * up_exps
     return &g_cache->layers[it->second].pub;
 }
 
+llama_moe_cache_stats llama_moe_cache_get_stats() {
+    llama_moe_cache_stats stats = {};
+    moe_cache * mc = g_cache;
+    if (!mc) {
+        return stats;
+    }
+
+    std::lock_guard<std::mutex> lock(mc->mtx);
+    stats.n_layers = (int32_t) mc->layers.size();
+    stats.n_slots  = mc->n_slots;
+    for (const auto & ls : mc->layers) {
+        stats.n_hit  += ls.n_hit;
+        stats.n_miss += ls.n_miss;
+    }
+    return stats;
+}
+
 void llama_moe_cache_step() {
     moe_cache * mc = g_cache;
     if (!mc) {
@@ -353,8 +368,6 @@ void llama_moe_cache_step() {
     }
 
     std::lock_guard<std::mutex> lock(mc->mtx);
-    mc->n_steps++;
-
     // 2) schedule new uploads: evict at a sync point (clear the victim's table
     //    entry now), then hand the slice copies to the worker
     for (size_t li = 0; li < mc->layers.size(); ++li) {
@@ -398,11 +411,4 @@ void llama_moe_cache_step() {
         ls.pending.clear();
     }
     mc->wcv.notify_one();
-
-    if (mc->n_steps % 512 == 0) {
-        uint64_t h = 0, m = 0;
-        for (auto & ls : mc->layers) { h += ls.n_hit; m += ls.n_miss; }
-        LLAMA_LOG_INFO("moe-cache: steps=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " hit-rate=%.1f%%\n",
-                mc->n_steps, h, m, h + m ? 100.0*h/(h + m) : 0.0);
-    }
 }
