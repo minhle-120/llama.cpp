@@ -233,9 +233,10 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t ma
                     ls->pub.gate_c = ggml_new_tensor_3d(ctx, g->type, g->ne[0], g->ne[1], n_slots + 1);
                     ls->pub.down_c = ggml_new_tensor_3d(ctx, d->type, d->ne[0], d->ne[1], n_slots + 1);
                     ls->pub.dev_table = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, u->ne[2]);
-                    ggml_format_name(ls->pub.up_c,      "moe_cache_up.%d",   c.il);
-                    ggml_format_name(ls->pub.gate_c,    "moe_cache_gate.%d", c.il);
-                    ggml_format_name(ls->pub.down_c,    "moe_cache_down.%d", c.il);
+                    // Use source names so tensor split applies the same sharding rules.
+                    ggml_set_name(ls->pub.up_c,   u->name);
+                    ggml_set_name(ls->pub.gate_c, g->name);
+                    ggml_set_name(ls->pub.down_c, d->name);
                     ggml_format_name(ls->pub.dev_table, "moe_cache_tbl.%d",  c.il);
                 }
             }
