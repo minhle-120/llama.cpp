@@ -6,7 +6,7 @@
 // routing has strong temporal locality (LRU-64 hit rate ~67% over a mixed
 // workload) even though the long-run distribution is near-uniform. Decode on a
 // host-offloaded MoE layer is bound by host RAM bandwidth, so serving the hot
-// experts from VRAM removes most of the per-token DIMM traffic.
+// experts from VRAM removes most of the DIMM traffic.
 //
 // Mechanism (no custom kernels):
 //  - per cached layer, companion tensors up_c/gate_c/down_c of shape

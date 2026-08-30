@@ -58,9 +58,6 @@ void moe_obs_cb(const char * name, const struct ggml_tensor * ids, void * ud) {
 
     const int64_t n_ids    = ids->ne[0];
     const int64_t n_tokens = ids->ne[1];
-    if (n_tokens != 1) {
-        return;
-    }
 
     const int il = parse_layer_from_name(name);
     if (il < 0) {
