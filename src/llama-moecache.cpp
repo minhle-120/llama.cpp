@@ -402,7 +402,7 @@ void llama_moe_cache_step() {
     if (mc->n_steps % 512 == 0) {
         uint64_t h = 0, m = 0;
         for (auto & ls : mc->layers) { h += ls.n_hit; m += ls.n_miss; }
-        LLAMA_LOG_DEBUG("moe-cache: steps=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " hit-rate=%.1f%%\n",
+        LLAMA_LOG_INFO("moe-cache: steps=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " hit-rate=%.1f%%\n",
                 mc->n_steps, h, m, h + m ? 100.0*h/(h + m) : 0.0);
     }
 }
