@@ -361,10 +361,6 @@ extern "C" {
     GGML_API void            ggml_set_moe_obs_callback(ggml_moe_obs_cb_t cb, void * ud);
     GGML_API ggml_moe_obs_cb_t ggml_get_moe_obs_callback(void ** ud);
 
-    typedef void (*ggml_moe_cpu_stats_cb_t)(const char * tensor_name, uint64_t n_selected, uint64_t n_skipped, uint64_t n_vec_dot, uint64_t n_converted, uint64_t fast_path_us, void * ud);
-    GGML_API void                  ggml_set_moe_cpu_stats_callback(ggml_moe_cpu_stats_cb_t cb, void * ud);
-    GGML_API ggml_moe_cpu_stats_cb_t ggml_get_moe_cpu_stats_callback(void ** ud);
-
     GGML_NORETURN GGML_ATTRIBUTE_FORMAT(3, 4)
     GGML_API void ggml_abort(const char * file, int line, const char * fmt, ...);
 

@@ -1590,13 +1590,6 @@ extern "C" {
     struct llama_moe_cache_stats {
         uint64_t n_hit;
         uint64_t n_miss;
-        uint64_t n_cpu_calls;
-        uint64_t n_cpu_selected;
-        uint64_t n_cpu_skipped;
-        uint64_t n_cpu_vec_dot;
-        uint64_t n_cpu_converted;
-        uint64_t n_cpu_fast_path_calls;
-        uint64_t n_cpu_fast_path_us;
 
         int32_t n_layers;
         int32_t n_slots;

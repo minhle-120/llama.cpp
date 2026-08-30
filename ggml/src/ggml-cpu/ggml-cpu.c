@@ -1543,7 +1543,6 @@ static void ggml_compute_forward_mul_mat_id(
 
     const int ith = params->ith;
     const int nth = params->nth;
-    const int64_t fast_path_start_us = ith == 0 && dst->src[3] ? ggml_time_us() : 0;
 
     const enum ggml_type type = src0->type;
 
@@ -1659,18 +1658,6 @@ static void ggml_compute_forward_mul_mat_id(
 
     if (dst->src[3]) {
         ggml_barrier(params->threadpool);
-        if (ith == 0) {
-            void * stats_ud = NULL;
-            ggml_moe_cpu_stats_cb_t stats_cb = ggml_get_moe_cpu_stats_callback(&stats_ud);
-            if (stats_cb) {
-                const uint64_t n_selected   = (uint64_t) n_ids*ids->ne[1];
-                const uint64_t n_skipped    = n_selected - *n_active_rows;
-                const uint64_t n_vec_dot    = *n_active_rows*ne01;
-                const uint64_t n_converted  = *n_active_rows > 0 && src1->type != vec_dot_type ? ggml_nelements(src1) : 0;
-                const uint64_t fast_path_us = *n_active_rows == 0 ? ggml_time_us() - fast_path_start_us : 0;
-                stats_cb(src0->name, n_selected, n_skipped, n_vec_dot, n_converted, fast_path_us, stats_ud);
-            }
-        }
         if (*n_active_rows == 0) {
             return;
         }

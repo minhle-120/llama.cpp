@@ -986,11 +986,6 @@ static char * fmt_size(size_t size) {
 }
 
 static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
-    int cpu_op_counts[GGML_OP_COUNT] = {};
-    const ggml_tensor * cpu_op_first[GGML_OP_COUNT] = {};
-    int n_cpu_nodes = 0;
-    int n_cpu_cached_mul_mat_id = 0;
-
     int cur_split = 0;
     for (int i = 0; i < graph->n_nodes; i++) {
         if (cur_split < sched->n_splits && i == sched->splits[cur_split].i_start) {
@@ -1011,15 +1006,8 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
         if (ggml_is_view_op(node->op)) {
             continue;
         }
-        ggml_backend_t tensor_backend = ggml_backend_sched_get_tensor_backend(sched, node);
-        if (sched->debug > 2 && tensor_backend &&
-            ggml_backend_dev_type(ggml_backend_get_device(tensor_backend)) == GGML_BACKEND_DEVICE_TYPE_CPU) {
-            cpu_op_counts[node->op]++;
-            cpu_op_first[node->op] = cpu_op_first[node->op] ? cpu_op_first[node->op] : node;
-            n_cpu_nodes++;
-            n_cpu_cached_mul_mat_id += node->op == GGML_OP_MUL_MAT_ID && node->src[3] != nullptr;
-        }
-        if (sched->debug == 2) {
+        if (sched->debug > 1) {
+            ggml_backend_t tensor_backend = ggml_backend_sched_get_tensor_backend(sched, node);
             GGML_LOG_DEBUG("node #%3d (%10.10s): %20.20s (%5.5s) [%5.5s %8.8s] use=%d,c=%d:", i, ggml_op_desc(node), node->name,
                 fmt_size(ggml_nbytes(node)), tensor_backend ? ggml_backend_name(tensor_backend) : "NULL", GET_CAUSE(node),
                 graph->use_counts[ggml_hash_find(&graph->visited_hash_set, node)], node->flags & GGML_TENSOR_FLAG_COMPUTE ? 1 : 0);
@@ -1033,17 +1021,6 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
                     fmt_size(ggml_nbytes(src)), src_backend ? ggml_backend_name(src_backend) : "NULL", GET_CAUSE(src));
             }
             GGML_LOG_DEBUG("\n");
-        }
-    }
-
-    if (sched->debug > 2) {
-        GGML_LOG_WARN("[DEBUG-sched-cpu] graph nodes = %d, cpu nodes = %d, cached mul_mat_id = %d\n",
-                graph->n_nodes, n_cpu_nodes, n_cpu_cached_mul_mat_id);
-        for (int op = 0; op < GGML_OP_COUNT; op++) {
-            if (cpu_op_counts[op] > 0) {
-                GGML_LOG_WARN("[DEBUG-sched-cpu] op = %s, count = %d, first = %s\n",
-                        ggml_op_desc(cpu_op_first[op]), cpu_op_counts[op], cpu_op_first[op]->name);
-            }
         }
     }
 }
@@ -1829,9 +1806,6 @@ ggml_backend_sched_t ggml_backend_sched_new(
 
     const char * GGML_SCHED_DEBUG = getenv("GGML_SCHED_DEBUG");
     sched->debug = GGML_SCHED_DEBUG ? atoi(GGML_SCHED_DEBUG) : 0;
-    if (sched->debug > 2) {
-        GGML_LOG_WARN("[DEBUG-sched-cpu] enabled, GGML_SCHED_DEBUG = %d\n", sched->debug);
-    }
 
     sched->debug_realloc = 0;
 #ifdef GGML_SCHED_NO_REALLOC
