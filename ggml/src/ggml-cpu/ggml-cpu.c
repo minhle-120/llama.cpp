@@ -1634,6 +1634,8 @@ static void ggml_compute_forward_mul_mat_id(
             moe_dummy = ggml_get_op_params_i32(dst, 0);
         }
 
+        uint64_t n_skipped = 0;
+
         // group rows by src0 matrix
         for (int64_t iid1 = 0; iid1 < ids->ne[1]; ++iid1) {
             for (int id = 0; id < n_ids; ++id) {
@@ -1643,11 +1645,23 @@ static void ggml_compute_forward_mul_mat_id(
 
                 if (moe_tbl && moe_tbl[i02] != moe_dummy) {
                     memset((char *) dst->data + id*nb1 + iid1*nb2, 0, ne0*sizeof(float));
+                    n_skipped++;
                     continue;
                 }
 
                 MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, iid1};
                 matrix_row_counts[i02] += 1;
+            }
+        }
+
+        if (moe_tbl) {
+            void * stats_ud = NULL;
+            ggml_moe_cpu_stats_cb_t stats_cb = ggml_get_moe_cpu_stats_callback(&stats_ud);
+            if (stats_cb) {
+                const uint64_t n_selected  = (uint64_t) n_ids*ids->ne[1];
+                const uint64_t n_vec_dot   = (n_selected - n_skipped)*ne01;
+                const uint64_t n_converted = src1->type != vec_dot_type ? ggml_nelements(src1) : 0;
+                stats_cb(src0->name, n_selected, n_skipped, n_vec_dot, n_converted, stats_ud);
             }
         }
 

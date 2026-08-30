@@ -37,6 +37,12 @@ struct moe_cache {
 
     std::vector<ggml_context *>         ctxs;
     std::vector<ggml_backend_buffer_t>  bufs;
+
+    uint64_t n_cpu_calls     = 0;
+    uint64_t n_cpu_selected  = 0;
+    uint64_t n_cpu_skipped   = 0;
+    uint64_t n_cpu_vec_dot   = 0;
+    uint64_t n_cpu_converted = 0;
 };
 
 moe_cache * g_cache = nullptr;
@@ -92,6 +98,18 @@ void moe_obs_cb(const char * name, const struct ggml_tensor * ids, void * ud) {
             }
         }
     }
+}
+
+void moe_cpu_stats_cb(const char * name, uint64_t n_selected, uint64_t n_skipped, uint64_t n_vec_dot, uint64_t n_converted, void * ud) {
+    GGML_UNUSED(name);
+    moe_cache * mc = (moe_cache *) ud;
+
+    std::lock_guard<std::mutex> lock(mc->mtx);
+    mc->n_cpu_calls++;
+    mc->n_cpu_selected  += n_selected;
+    mc->n_cpu_skipped   += n_skipped;
+    mc->n_cpu_vec_dot   += n_vec_dot;
+    mc->n_cpu_converted += n_converted;
 }
 
 void upload_slice(ggml_tensor * dst_c, const ggml_tensor * src, int32_t expert, int32_t slot) {
@@ -252,6 +270,7 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
         }
 
         ggml_set_moe_obs_callback(moe_obs_cb, mc);
+        ggml_set_moe_cpu_stats_callback(moe_cpu_stats_cb, mc);
         g_cache = mc;
         g_init_done = true;
 
@@ -281,6 +300,11 @@ llama_moe_cache_stats llama_moe_cache_get_stats() {
     std::lock_guard<std::mutex> lock(mc->mtx);
     stats.n_layers = (int32_t) mc->layers.size();
     stats.n_slots  = mc->n_slots;
+    stats.n_cpu_calls     = mc->n_cpu_calls;
+    stats.n_cpu_selected  = mc->n_cpu_selected;
+    stats.n_cpu_skipped   = mc->n_cpu_skipped;
+    stats.n_cpu_vec_dot   = mc->n_cpu_vec_dot;
+    stats.n_cpu_converted = mc->n_cpu_converted;
     for (const auto & ls : mc->layers) {
         stats.n_hit  += ls.n_hit;
         stats.n_miss += ls.n_miss;
