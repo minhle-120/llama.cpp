@@ -2116,10 +2116,19 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         mcache = llama_moe_cache_lookup(up_exps);
     }
     if (mcache) {
-        ggml_tensor * mc_expert_ids = ggml_is_contiguous(selected_experts) ? selected_experts : ggml_cont(ctx0, selected_experts);
-        mc_expert_ids = ggml_reshape_1d(ctx0, mc_expert_ids, n_expert_used*n_tokens);
-        mc_slot_ids = ggml_get_rows(ctx0, mcache->dev_table, mc_expert_ids);
-        mc_slot_ids = ggml_reshape_2d(ctx0, mc_slot_ids, n_expert_used, n_tokens);
+        if (n_expert_used != mcache->n_expert_used) {
+            mcache = nullptr;
+        }
+    }
+    if (mcache) {
+        for (int64_t lane = 0; lane < n_expert_used; ++lane) {
+            ggml_tensor * ids = ggml_view_2d(ctx0, selected_experts, 1, n_tokens, selected_experts->nb[1], lane*selected_experts->nb[0]);
+            ids = ggml_reshape_1d(ctx0, ggml_cont(ctx0, ids), n_tokens);
+
+            ggml_tensor * table = ggml_view_2d(ctx0, mcache->dev_table, 1, mcache->dev_table->ne[1], mcache->dev_table->nb[1], lane*mcache->dev_table->nb[2]);
+            ggml_tensor * slots = ggml_reshape_2d(ctx0, ggml_get_rows(ctx0, table, ids), 1, n_tokens);
+            mc_slot_ids = mc_slot_ids ? ggml_concat(ctx0, mc_slot_ids, slots, 0) : slots;
+        }
         cb(mc_slot_ids, "ffn_moe_cache_slots", il);
     }
 

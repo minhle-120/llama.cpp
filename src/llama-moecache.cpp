@@ -104,9 +104,11 @@ void upload_slice(ggml_tensor * dst_c, const ggml_tensor * src, int32_t expert, 
 }
 
 void set_table_entry(llama_moe_cache_layer & pub, int32_t expert, int32_t slot_or_dummy) {
-    const int32_t v = slot_or_dummy;
-    ggml_backend_tensor_set(pub.dev_table,  &v, (size_t) expert*sizeof(int32_t), sizeof(int32_t));
-    ggml_backend_tensor_set(pub.host_table, &v, (size_t) expert*sizeof(int32_t), sizeof(int32_t));
+    ggml_backend_tensor_set(pub.host_table, &slot_or_dummy, (size_t) expert*sizeof(int32_t), sizeof(int32_t));
+    for (int32_t lane = 0; lane < pub.n_expert_used; ++lane) {
+        const int32_t slot = slot_or_dummy < pub.n_slots ? slot_or_dummy : pub.n_slots + lane;
+        ggml_backend_tensor_set(pub.dev_table, &slot, (size_t) lane*pub.dev_table->nb[2] + (size_t) expert*sizeof(int32_t), sizeof(int32_t));
+    }
 }
 
 } // namespace
@@ -181,6 +183,7 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
                     ls = &mc->layers.back();
                     ls->pub.il       = c.il;
                     ls->pub.n_slots  = n_slots;
+                    ls->pub.n_expert_used = model.hparams.n_expert_used;
                     ls->pub.up_src   = c.l->ffn_up_exps;
                     ls->pub.gate_src = c.l->ffn_gate_exps;
                     ls->pub.down_src = c.l->ffn_down_exps;
@@ -193,10 +196,11 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
                     const ggml_tensor * u = c.l->ffn_up_exps;
                     const ggml_tensor * g = c.l->ffn_gate_exps;
                     const ggml_tensor * d = c.l->ffn_down_exps;
-                    ls->pub.up_c   = ggml_new_tensor_3d(ctx, u->type, u->ne[0], u->ne[1], n_slots + 1);
-                    ls->pub.gate_c = ggml_new_tensor_3d(ctx, g->type, g->ne[0], g->ne[1], n_slots + 1);
-                    ls->pub.down_c = ggml_new_tensor_3d(ctx, d->type, d->ne[0], d->ne[1], n_slots + 1);
-                    ls->pub.dev_table = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, u->ne[2]);
+                    const int32_t n_cache_experts = n_slots + ls->pub.n_expert_used;
+                    ls->pub.up_c   = ggml_new_tensor_3d(ctx, u->type, u->ne[0], u->ne[1], n_cache_experts);
+                    ls->pub.gate_c = ggml_new_tensor_3d(ctx, g->type, g->ne[0], g->ne[1], n_cache_experts);
+                    ls->pub.down_c = ggml_new_tensor_3d(ctx, d->type, d->ne[0], d->ne[1], n_cache_experts);
+                    ls->pub.dev_table = ggml_new_tensor_3d(ctx, GGML_TYPE_I32, 1, u->ne[2], ls->pub.n_expert_used);
                     // Use source names so tensor split applies the same sharding rules.
                     ggml_set_name(ls->pub.up_c,   u->name);
                     ggml_set_name(ls->pub.gate_c, g->name);
@@ -246,7 +250,11 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
             std::iota(experts.begin(), experts.end(), 0);
             std::shuffle(experts.begin(), experts.end(), rng);
 
-            std::vector<int32_t> table(n_expert, n_slots);
+            std::vector<int32_t> host_table(n_expert, n_slots);
+            std::vector<int32_t> dev_table(n_expert*ls.pub.n_expert_used);
+            for (int32_t lane = 0; lane < ls.pub.n_expert_used; ++lane) {
+                std::fill_n(dev_table.begin() + lane*n_expert, n_expert, n_slots + lane);
+            }
             const int32_t n_fill = std::min<int32_t>(n_slots, n_expert);
             for (int32_t slot = 0; slot < n_fill; ++slot) {
                 const int32_t expert = experts[slot];
@@ -256,10 +264,13 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
 
                 ls.slot_expert[slot]   = expert;
                 ls.expert_slot[expert] = slot;
-                table[expert]          = slot;
+                host_table[expert]     = slot;
+                for (int32_t lane = 0; lane < ls.pub.n_expert_used; ++lane) {
+                    dev_table[lane*n_expert + expert] = slot;
+                }
             }
-            ggml_backend_tensor_set(ls.pub.dev_table,  table.data(), 0, n_expert*sizeof(int32_t));
-            ggml_backend_tensor_set(ls.pub.host_table, table.data(), 0, n_expert*sizeof(int32_t));
+            ggml_backend_tensor_set(ls.pub.dev_table,  dev_table.data(),  0, dev_table.size()*sizeof(int32_t));
+            ggml_backend_tensor_set(ls.pub.host_table, host_table.data(), 0, host_table.size()*sizeof(int32_t));
 
             mc->by_up_src[ls.pub.up_src] = &ls - mc->layers.data();
             vram += ggml_nbytes(ls.pub.up_c) + ggml_nbytes(ls.pub.gate_c) + ggml_nbytes(ls.pub.down_c);
