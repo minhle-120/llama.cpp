@@ -1595,6 +1595,8 @@ extern "C" {
         uint64_t n_cpu_skipped;
         uint64_t n_cpu_vec_dot;
         uint64_t n_cpu_converted;
+        uint64_t n_cpu_fast_path_calls;
+        uint64_t n_cpu_fast_path_us;
 
         int32_t n_layers;
         int32_t n_slots;

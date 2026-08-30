@@ -566,8 +566,11 @@ struct server_slot {
                 const uint64_t n_cpu_computed  = n_cpu_selected - n_cpu_skipped;
                 const uint64_t n_cpu_vec_dot   = moe_cache.n_cpu_vec_dot   - moe_cache_start.n_cpu_vec_dot;
                 const uint64_t n_cpu_converted = moe_cache.n_cpu_converted - moe_cache_start.n_cpu_converted;
-                SLT_INF(*this, "[DEBUG-moe-cpu] calls = %" PRIu64 ", selected = %" PRIu64 ", skipped = %" PRIu64 ", computed = %" PRIu64 ", vec dots = %" PRIu64 ", converted = %" PRIu64 " (request)\n",
-                        n_cpu_calls, n_cpu_selected, n_cpu_skipped, n_cpu_computed, n_cpu_vec_dot, n_cpu_converted);
+                const uint64_t n_cpu_fast_path_calls = moe_cache.n_cpu_fast_path_calls - moe_cache_start.n_cpu_fast_path_calls;
+                const uint64_t n_cpu_fast_path_us    = moe_cache.n_cpu_fast_path_us    - moe_cache_start.n_cpu_fast_path_us;
+                SLT_INF(*this, "[DEBUG-moe-cpu] calls = %" PRIu64 ", selected = %" PRIu64 ", skipped = %" PRIu64 ", computed = %" PRIu64 ", vec dots = %" PRIu64 ", converted = %" PRIu64 ", fast calls = %" PRIu64 ", fast path = %.3f ms (request)\n",
+                        n_cpu_calls, n_cpu_selected, n_cpu_skipped, n_cpu_computed, n_cpu_vec_dot, n_cpu_converted,
+                        n_cpu_fast_path_calls, n_cpu_fast_path_us/1000.0);
                 llama_moe_cache_end_generation();
             }
 
