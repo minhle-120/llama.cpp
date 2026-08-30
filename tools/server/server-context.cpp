@@ -355,6 +355,9 @@ struct server_slot {
 
     server_slot_stats stats;
 
+    llama_moe_cache_stats moe_cache_start   = {};
+    bool                  moe_cache_started = false;
+
     // accepted tokens per draft position
     // not in server_slot_stats to avoid copying to every task result
     std::vector<uint64_t> n_accepted_per_pos;
@@ -393,6 +396,8 @@ struct server_slot {
 
         // note: callback_on_reset() must have run before this, see release()
         stats = {};
+        moe_cache_start   = {};
+        moe_cache_started = false;
         n_accepted_per_pos.clear();
 
         n_predict_max = -1;
@@ -548,11 +553,13 @@ struct server_slot {
             SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d\n", prompt.n_tokens(), truncated);
 
             const auto moe_cache = llama_moe_cache_get_stats();
-            if (moe_cache.n_layers > 0) {
-                const uint64_t total = moe_cache.n_hit + moe_cache.n_miss;
-                SLT_INF(*this, "moe cache: layers = %d, slots = %d, hits = %" PRIu64 ", misses = %" PRIu64 ", hit rate = %.1f%% (cumulative)\n",
-                        moe_cache.n_layers, moe_cache.n_slots, moe_cache.n_hit, moe_cache.n_miss,
-                        total > 0 ? 100.0*moe_cache.n_hit/total : 0.0);
+            if (moe_cache_started && moe_cache.n_layers > 0) {
+                const uint64_t n_hit  = moe_cache.n_hit  - moe_cache_start.n_hit;
+                const uint64_t n_miss = moe_cache.n_miss - moe_cache_start.n_miss;
+                const uint64_t total  = n_hit + n_miss;
+                SLT_INF(*this, "moe cache: layers = %d, slots = %d, hits = %" PRIu64 ", misses = %" PRIu64 ", hit rate = %.1f%% (request)\n",
+                        moe_cache.n_layers, moe_cache.n_slots, n_hit, n_miss,
+                        total > 0 ? 100.0*n_hit/total : 0.0);
             }
 
             t_last_used = ggml_time_us();
@@ -3847,6 +3854,8 @@ private:
             slot.stats.n_gen += 1;
 
             if (slot.stats.n_gen == 1) {
+                slot.moe_cache_start   = llama_moe_cache_get_stats();
+                slot.moe_cache_started = true;
                 slot.stats.update_prompt_last();
                 slot.t_print_last = t_now;
                 slot.n_gen_last = 0;
@@ -3988,6 +3997,11 @@ private:
                 // TODO: set result.probs
 
                 slot.stats.n_gen += 1;
+
+                if (slot.stats.n_gen == 1) {
+                    slot.moe_cache_start   = llama_moe_cache_get_stats();
+                    slot.moe_cache_started = true;
+                }
 
                 if (!process_token(result, slot)) {
                     slot.print_timings();
