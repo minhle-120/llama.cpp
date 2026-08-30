@@ -11,6 +11,8 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <numeric>
+#include <random>
 #include <vector>
 
 namespace {
@@ -233,7 +235,9 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
             return;
         }
 
-        // init state + tables (everything uncached -> dummy slot n_slots)
+        std::mt19937 rng(std::random_device{}());
+
+        // init state + tables
         size_t vram = 0;
         for (auto & ls : mc->layers) {
             const int64_t n_expert = ls.pub.up_src->ne[2];
@@ -241,9 +245,24 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
             ls.expert_slot.assign(n_expert, -1);
             ls.request_use.assign(n_expert, 0);
 
-            std::vector<int32_t> dummy(n_expert, n_slots);
-            ggml_backend_tensor_set(ls.pub.dev_table,  dummy.data(), 0, n_expert*sizeof(int32_t));
-            ggml_backend_tensor_set(ls.pub.host_table, dummy.data(), 0, n_expert*sizeof(int32_t));
+            std::vector<int32_t> experts(n_expert);
+            std::iota(experts.begin(), experts.end(), 0);
+            std::shuffle(experts.begin(), experts.end(), rng);
+
+            std::vector<int32_t> table(n_expert, n_slots);
+            const int32_t n_fill = std::min<int32_t>(n_slots, n_expert);
+            for (int32_t slot = 0; slot < n_fill; ++slot) {
+                const int32_t expert = experts[slot];
+                upload_slice(ls.pub.up_c,   ls.pub.up_src,   expert, slot);
+                upload_slice(ls.pub.gate_c, ls.pub.gate_src, expert, slot);
+                upload_slice(ls.pub.down_c, ls.pub.down_src, expert, slot);
+
+                ls.slot_expert[slot]   = expert;
+                ls.expert_slot[expert] = slot;
+                table[expert]          = slot;
+            }
+            ggml_backend_tensor_set(ls.pub.dev_table,  table.data(), 0, n_expert*sizeof(int32_t));
+            ggml_backend_tensor_set(ls.pub.host_table, table.data(), 0, n_expert*sizeof(int32_t));
 
             mc->by_up_src[ls.pub.up_src] = &ls - mc->layers.data();
             vram += ggml_nbytes(ls.pub.up_c) + ggml_nbytes(ls.pub.gate_c) + ggml_nbytes(ls.pub.down_c);
