@@ -1574,6 +1574,9 @@ static void ggml_compute_forward_mul_mat_id(
     int64_t * matrix_row_counts = // [n_as]
         incr_ptr_aligned(&wdata_cur, n_as*sizeof(int64_t), sizeof(int64_t));
 
+    int64_t * n_active_rows =
+        incr_ptr_aligned(&wdata_cur, sizeof(int64_t), sizeof(int64_t));
+
     struct mmid_row_mapping * matrix_rows = // [n_as][ids->ne[0]*ids->ne[1]]
         incr_ptr_aligned(&wdata_cur, n_as*ids->ne[0]*ids->ne[1]*sizeof(struct mmid_row_mapping), sizeof(int64_t));
 
@@ -1582,46 +1585,10 @@ static void ggml_compute_forward_mul_mat_id(
 
     GGML_ASSERT(params->wsize >= (size_t)((char *) wdata_cur - (char *) params->wdata));
 
-    if (src1->type != vec_dot_type) {
-        char * wdata = params->wdata;
-
-        const size_t nbw0 = ggml_type_size(vec_dot_type);
-        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
-        const size_t nbw2 = nbw1*ne11;
-        const size_t nbw3 = nbw2*ne12;
-
-        assert(params->wsize >= ne13*nbw3);
-        GGML_ASSERT(src1->type == GGML_TYPE_F32);
-
-#if 0
-        for (int64_t i13 = 0; i13 < ne13; ++i13) {
-            for (int64_t i12 = ith; i12 < ne12; i12 += nth) {
-                for (int64_t i11 = 0; i11 < ne11; ++i11) {
-                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
-                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
-                               ne10);
-                }
-            }
-        }
-#else
-        for (int64_t i13 = 0; i13 < ne13; ++i13) {
-            for (int64_t i12 = 0; i12 < ne12; ++i12) {
-                for (int64_t i11 = 0; i11 < ne11; ++i11) {
-                    size_t bs = ggml_blck_size(vec_dot_type);
-                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
-                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
-                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
-                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
-                               (ne10_block_end - ne10_block_start) * bs);
-                }
-            }
-        }
-#endif
-    }
-
     if (ith == 0) {
         // initialize matrix_row_counts
         memset(matrix_row_counts, 0, n_as*sizeof(int64_t));
+        *n_active_rows = 0;
 
         // llama MoE expert cache: when src[3] is set it is an I32 table mapping
         // expert id -> device cache slot, with op_params[0] holding the "not
@@ -1651,6 +1618,7 @@ static void ggml_compute_forward_mul_mat_id(
 
                 MMID_MATRIX_ROW(i02, matrix_row_counts[i02]) = (struct mmid_row_mapping) {id, iid1};
                 matrix_row_counts[i02] += 1;
+                *n_active_rows += 1;
             }
         }
 
@@ -1660,7 +1628,7 @@ static void ggml_compute_forward_mul_mat_id(
             if (stats_cb) {
                 const uint64_t n_selected  = (uint64_t) n_ids*ids->ne[1];
                 const uint64_t n_vec_dot   = (n_selected - n_skipped)*ne01;
-                const uint64_t n_converted = src1->type != vec_dot_type ? ggml_nelements(src1) : 0;
+                const uint64_t n_converted = *n_active_rows > 0 && src1->type != vec_dot_type ? ggml_nelements(src1) : 0;
                 stats_cb(src0->name, n_selected, n_skipped, n_vec_dot, n_converted, stats_ud);
             }
         }
@@ -1702,10 +1670,54 @@ static void ggml_compute_forward_mul_mat_id(
         }
     }
 
+    if (dst->src[3]) {
+        ggml_barrier(params->threadpool);
+        if (*n_active_rows == 0) {
+            return;
+        }
+    }
+
     // reset current_chunk
     for (int cur_a = ith; cur_a < n_as; cur_a += nth) {
         atomic_int * current_chunk_ctr = (atomic_int *)(atomic_current_chunk + cur_a);
         *current_chunk_ctr = nth;
+    }
+
+    if (src1->type != vec_dot_type) {
+        char * wdata = params->wdata;
+
+        const size_t nbw0 = ggml_type_size(vec_dot_type);
+        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw2 = nbw1*ne11;
+        const size_t nbw3 = nbw2*ne12;
+
+        assert(params->wsize >= ne13*nbw3);
+        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+
+#if 0
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = ith; i12 < ne12; i12 += nth) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
+                               ne10);
+                }
+            }
+        }
+#else
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    size_t bs = ggml_blck_size(vec_dot_type);
+                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
+                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                               (ne10_block_end - ne10_block_start) * bs);
+                }
+            }
+        }
+#endif
     }
 
     ggml_barrier(params->threadpool);
@@ -2938,6 +2950,8 @@ struct ggml_cplan ggml_graph_plan(
                         }
                         // matrix_row_counts
                         cur += n_as * sizeof(int64_t) + sizeof(int64_t);
+                        // n_active_rows
+                        cur += sizeof(int64_t) + sizeof(int64_t);
                         // matrix_rows
                         cur += n_as*ids->ne[0]*ids->ne[1]*sizeof(struct mmid_row_mapping) + sizeof(int64_t);
                         // atomic_current_chunk
