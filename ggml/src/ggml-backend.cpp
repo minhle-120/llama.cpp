@@ -1037,11 +1037,11 @@ static void ggml_backend_sched_print_assignments(ggml_backend_sched_t sched, str
     }
 
     if (sched->debug > 2) {
-        GGML_LOG_INFO("[DEBUG-sched-cpu] graph nodes = %d, cpu nodes = %d, cached mul_mat_id = %d\n",
+        GGML_LOG_WARN("[DEBUG-sched-cpu] graph nodes = %d, cpu nodes = %d, cached mul_mat_id = %d\n",
                 graph->n_nodes, n_cpu_nodes, n_cpu_cached_mul_mat_id);
         for (int op = 0; op < GGML_OP_COUNT; op++) {
             if (cpu_op_counts[op] > 0) {
-                GGML_LOG_INFO("[DEBUG-sched-cpu] op = %s, count = %d, first = %s\n",
+                GGML_LOG_WARN("[DEBUG-sched-cpu] op = %s, count = %d, first = %s\n",
                         ggml_op_desc(cpu_op_first[op]), cpu_op_counts[op], cpu_op_first[op]->name);
             }
         }
@@ -1829,6 +1829,9 @@ ggml_backend_sched_t ggml_backend_sched_new(
 
     const char * GGML_SCHED_DEBUG = getenv("GGML_SCHED_DEBUG");
     sched->debug = GGML_SCHED_DEBUG ? atoi(GGML_SCHED_DEBUG) : 0;
+    if (sched->debug > 2) {
+        GGML_LOG_WARN("[DEBUG-sched-cpu] enabled, GGML_SCHED_DEBUG = %d\n", sched->debug);
+    }
 
     sched->debug_realloc = 0;
 #ifdef GGML_SCHED_NO_REALLOC
