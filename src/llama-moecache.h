@@ -6,13 +6,13 @@
 // routing has strong temporal locality (LRU-64 hit rate ~67% over a mixed
 // workload) even though the long-run distribution is near-uniform. Decode on a
 // host-offloaded MoE layer is bound by host RAM bandwidth, so serving the hot
-// experts from VRAM removes most of the DIMM traffic.
+// experts from VRAM removes most of the per-token DIMM traffic.
 //
 // Mechanism (no custom kernels):
-//  - per cached layer, companion tensors up_c/gate_c/down_c contain the cache
-//    slots followed by one zero slot for each routed expert position.
-//  - one device I32 table per routed position maps expert id to a cache slot
-//    or to that position's zero slot.
+//  - per cached layer, companion tensors up_c/gate_c/down_c of shape
+//    [ne0, ne1, n_slots+1] live in the device buffer of that layer's router;
+//    slot n_slots is permanently zero (the "dummy" slot).
+//  - an I32 table[512] maps expert id -> slot, or n_slots when uncached.
 //    One copy on device (read by get_rows to remap ids for the cache-side
 //    mul_mat_id chain) and one on host (read by the CPU mul_mat_id via
 //    src[3] to SKIP cached ids, zeroing their dst rows).
@@ -33,20 +33,18 @@ struct llama_moe_cache_layer {
     int il = -1;
 
     int32_t n_slots = 0;
-    int32_t n_expert_used = 0;
 
     // host-resident source weights (the authoritative experts)
     ggml_tensor * up_src   = nullptr;
     ggml_tensor * gate_src = nullptr;
     ggml_tensor * down_src = nullptr;
 
-    // device-resident cache slots followed by n_expert_used zero slots
+    // device-resident cache slots, ne[2] == n_slots + 1 (last slot all zeros)
     ggml_tensor * up_c   = nullptr;
     ggml_tensor * gate_c = nullptr;
     ggml_tensor * down_c = nullptr;
 
-    // device table: I32 [1, n_expert, n_expert_used]
-    // host table: I32 [1, n_expert]
+    // expert id -> slot (or n_slots when uncached); I32 [1, n_expert]
     ggml_tensor * dev_table  = nullptr;
     ggml_tensor * host_table = nullptr;
 };

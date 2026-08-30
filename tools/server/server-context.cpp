@@ -1824,12 +1824,6 @@ private:
 
         slot.task = std::make_unique<const server_task>(std::move(task));
 
-        slot.moe_cache_start = llama_moe_cache_get_stats();
-        if (slot.moe_cache_start.n_layers > 0) {
-            slot.moe_cache_started = true;
-            llama_moe_cache_begin_generation();
-        }
-
         slot.state = slot.task->is_child()
             ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
             : SLOT_STATE_STARTED;
@@ -3861,6 +3855,9 @@ private:
             slot.stats.n_gen += 1;
 
             if (slot.stats.n_gen == 1) {
+                slot.moe_cache_start   = llama_moe_cache_get_stats();
+                slot.moe_cache_started = true;
+                llama_moe_cache_begin_generation();
                 slot.stats.update_prompt_last();
                 slot.t_print_last = t_now;
                 slot.n_gen_last = 0;
@@ -4002,6 +3999,12 @@ private:
                 // TODO: set result.probs
 
                 slot.stats.n_gen += 1;
+
+                if (slot.stats.n_gen == 1) {
+                    slot.moe_cache_start   = llama_moe_cache_get_stats();
+                    slot.moe_cache_started = true;
+                    llama_moe_cache_begin_generation();
+                }
 
                 if (!process_token(result, slot)) {
                     slot.print_timings();
