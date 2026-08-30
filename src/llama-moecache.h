@@ -1,6 +1,6 @@
 #pragma once
 
-// GPU-resident LRU cache for MoE expert weights that -ot pinned to host memory.
+// GPU-resident cache for MoE expert weights pinned to host memory with -ot.
 //
 // Motivation (measured on Qwen3.8-Flash-Next, 512 experts / 10 routed): expert
 // routing has strong temporal locality (LRU-64 hit rate ~67% over a mixed
@@ -19,9 +19,8 @@
 //  - the two down-projection outputs are summed; uncached ids contribute 0
 //    through the cache chain (zero slot) and cached ids contribute 0 through
 //    the CPU chain (skip), so the result is exact.
-//  - llama_moe_cache_step(), called at the end of llama_context::decode(),
-//    performs throttled LRU updates: at most LLAMA_MOE_CACHE_INSERTS expert
-//    uploads per layer per step via ggml_backend_tensor_set.
+//  - the cache stays fixed during generation. At request end, the most-used
+//    uncached experts replace less-used cached experts.
 //
 // Enabled via llama_context_params.n_moe_cache_slots (CLI: --moe-expert-cache).
 
@@ -52,10 +51,7 @@ struct llama_moe_cache_layer {
 
 // build the cache for every host-resident expert layer of the model.
 // Safe to call more than once; only the first call does work.
-void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t max_inserts);
+void llama_moe_cache_init(const llama_model & model, int32_t n_slots);
 
 // nullptr when the cache is disabled or this tensor has no cached layer
 const llama_moe_cache_layer * llama_moe_cache_lookup(const ggml_tensor * up_exps);
-
-// apply throttled LRU updates; call between graph executions only
-void llama_moe_cache_step();

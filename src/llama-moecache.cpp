@@ -6,14 +6,11 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
-#include <condition_variable>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <map>
 #include <mutex>
-#include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -21,48 +18,25 @@ namespace {
 struct layer_state {
     llama_moe_cache_layer pub;
 
-    // LRU bookkeeping (host side; the tables mirror expert_slot)
-    std::vector<int32_t>  slot_expert;   // slot -> expert id, -1 when empty
-    std::vector<int32_t>  expert_slot;   // expert id -> slot, -1 when uncached
-    std::vector<uint64_t> slot_last_use; // slot -> lamport clock of last hit
-    std::vector<int32_t>  pending;       // uncached ids observed since last step (dedup, obs order)
-
-    std::vector<bool>     slot_in_flight; // slot has an upload pending
+    std::vector<int32_t>  slot_expert; // slot -> expert id, -1 when empty
+    std::vector<int32_t>  expert_slot; // expert id -> slot, -1 when uncached
+    std::vector<uint64_t> request_use; // expert id -> uses during this generation
 
     uint64_t n_hit  = 0;
     uint64_t n_miss = 0;
 };
 
-struct upload_job {
-    size_t  layer_idx;
-    int32_t expert;
-    int32_t slot;
-    bool    done = false;
-};
-
 struct moe_cache {
-    int32_t n_slots     = 0;
-    int32_t max_inserts = 2;
+    int32_t n_slots = 0;
+    int32_t n_active_generations = 0;
 
-    uint64_t clock = 0;
-
-    std::mutex mtx; // guards pending lists + clock (observe runs during graph exec)
+    std::mutex mtx;
 
     std::vector<layer_state> layers;
     std::map<const ggml_tensor *, size_t> by_up_src;
 
     std::vector<ggml_context *>         ctxs;
     std::vector<ggml_backend_buffer_t>  bufs;
-
-    // async upload worker: slices are copied to the device off the decode
-    // thread; the new table mapping is only published at a later step() once
-    // the upload has completed, so a running graph never reads a torn slot
-    std::thread              worker;
-    std::mutex               wmtx;
-    std::condition_variable  wcv;
-    std::deque<upload_job>   todo;
-    std::vector<upload_job>  done;
-    bool                     stop = false;
 };
 
 moe_cache * g_cache = nullptr;
@@ -82,8 +56,8 @@ void moe_obs_cb(const char * name, const struct ggml_tensor * ids, void * ud) {
 
     const int64_t n_ids    = ids->ne[0];
     const int64_t n_tokens = ids->ne[1];
-    if (n_tokens > 4) {
-        return; // batch/prefill: the cache graph is not built there, don't pollute the LRU
+    if (n_tokens != 1) {
+        return;
     }
 
     const int il = parse_layer_from_name(name);
@@ -100,25 +74,21 @@ void moe_obs_cb(const char * name, const struct ggml_tensor * ids, void * ud) {
     }
 
     std::lock_guard<std::mutex> lock(mc->mtx);
+    if (mc->n_active_generations == 0) {
+        return;
+    }
     for (int64_t t = 0; t < n_tokens; ++t) {
         for (int64_t i = 0; i < n_ids; ++i) {
             const int32_t id = *(const int32_t *) ((const char *) ids->data + t*ids->nb[1] + i*ids->nb[0]);
             if (id < 0 || id >= (int32_t) ls->expert_slot.size()) {
                 continue;
             }
+            ls->request_use[id]++;
             const int32_t slot = ls->expert_slot[id];
             if (slot >= 0) {
                 ls->n_hit++;
-                ls->slot_last_use[slot] = ++mc->clock;
             } else {
                 ls->n_miss++;
-                bool dup = false;
-                for (int32_t p : ls->pending) {
-                    if (p == id) { dup = true; break; }
-                }
-                if (!dup) {
-                    ls->pending.push_back(id);
-                }
             }
         }
     }
@@ -142,7 +112,7 @@ void set_table_entry(llama_moe_cache_layer & pub, int32_t expert, int32_t slot_o
 
 } // namespace
 
-void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t max_inserts) {
+void llama_moe_cache_init(const llama_model & model, int32_t n_slots) {
     std::lock_guard<std::mutex> init_lock(g_init_mtx);
     if (g_init_done) {
         return;
@@ -155,9 +125,6 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t ma
 
         auto * mc = new moe_cache();
         mc->n_slots = n_slots;
-        if (max_inserts > 0) {
-            mc->max_inserts = max_inserts;
-        }
 
         // collect the host-resident expert layers, grouped by the device buffer
         // type of that layer's router (the cache lives next to the router)
@@ -266,14 +233,13 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t ma
             return;
         }
 
-        // init LRU state + tables (everything uncached -> dummy slot n_slots)
+        // init state + tables (everything uncached -> dummy slot n_slots)
         size_t vram = 0;
         for (auto & ls : mc->layers) {
             const int64_t n_expert = ls.pub.up_src->ne[2];
             ls.slot_expert.assign(n_slots, -1);
             ls.expert_slot.assign(n_expert, -1);
-            ls.slot_last_use.assign(n_slots, 0);
-            ls.slot_in_flight.assign(n_slots, false);
+            ls.request_use.assign(n_expert, 0);
 
             std::vector<int32_t> dummy(n_expert, n_slots);
             ggml_backend_tensor_set(ls.pub.dev_table,  dummy.data(), 0, n_expert*sizeof(int32_t));
@@ -285,36 +251,12 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t ma
                     ls.pub.il, ls.pub.up_src->name, ls.pub.up_src->nb[2]);
         }
 
-        mc->worker = std::thread([mc]() {
-            for (;;) {
-                upload_job j;
-                {
-                    std::unique_lock<std::mutex> lk(mc->wmtx);
-                    mc->wcv.wait(lk, [mc]() { return mc->stop || !mc->todo.empty(); });
-                    if (mc->stop) {
-                        return;
-                    }
-                    j = mc->todo.front();
-                    mc->todo.pop_front();
-                }
-                auto & ls = mc->layers[j.layer_idx];
-                upload_slice(ls.pub.up_c,   ls.pub.up_src,   j.expert, j.slot);
-                upload_slice(ls.pub.gate_c, ls.pub.gate_src, j.expert, j.slot);
-                upload_slice(ls.pub.down_c, ls.pub.down_src, j.expert, j.slot);
-                {
-                    std::lock_guard<std::mutex> lk(mc->wmtx);
-                    j.done = true;
-                    mc->done.push_back(j);
-                }
-            }
-        });
-
         ggml_set_moe_obs_callback(moe_obs_cb, mc);
         g_cache = mc;
         g_init_done = true;
 
-        LLAMA_LOG_INFO("%s: MoE expert cache enabled: %zu layers x %d slots, %d inserts/step, %.1f MiB device memory\n",
-                __func__, mc->layers.size(), n_slots, mc->max_inserts, vram/1024.0/1024.0);
+        LLAMA_LOG_INFO("%s: MoE expert cache enabled: %zu layers x %d slots, %.1f MiB device memory\n",
+                __func__, mc->layers.size(), n_slots, vram/1024.0/1024.0);
     }();
 }
 
@@ -346,69 +288,92 @@ llama_moe_cache_stats llama_moe_cache_get_stats() {
     return stats;
 }
 
-void llama_moe_cache_step() {
+void llama_moe_cache_begin_generation() {
     moe_cache * mc = g_cache;
     if (!mc) {
         return;
     }
 
-    // 1) publish completed uploads (sync point: no graph is executing)
-    {
-        std::lock_guard<std::mutex> wlk(mc->wmtx);
-        std::lock_guard<std::mutex> lk(mc->mtx);
-        for (const auto & j : mc->done) {
-            auto & ls = mc->layers[j.layer_idx];
-            ls.slot_expert[j.slot]     = j.expert;
-            ls.expert_slot[j.expert]   = j.slot;
-            ls.slot_last_use[j.slot]   = ++mc->clock;
-            ls.slot_in_flight[j.slot]  = false;
-            set_table_entry(ls.pub, j.expert, j.slot);
+    std::lock_guard<std::mutex> lock(mc->mtx);
+    if (mc->n_active_generations == 0) {
+        for (auto & ls : mc->layers) {
+            std::fill(ls.request_use.begin(), ls.request_use.end(), 0);
         }
-        mc->done.clear();
+    }
+    mc->n_active_generations++;
+}
+
+void llama_moe_cache_end_generation() {
+    moe_cache * mc = g_cache;
+    if (!mc) {
+        return;
     }
 
     std::lock_guard<std::mutex> lock(mc->mtx);
-    // 2) schedule new uploads: evict at a sync point (clear the victim's table
-    //    entry now), then hand the slice copies to the worker
-    for (size_t li = 0; li < mc->layers.size(); ++li) {
-        auto & ls = mc->layers[li];
-        if (ls.pending.empty()) {
-            continue;
+    if (mc->n_active_generations == 0) {
+        return;
+    }
+    mc->n_active_generations--;
+    if (mc->n_active_generations > 0) {
+        return;
+    }
+
+    for (auto & ls : mc->layers) {
+        std::vector<int32_t> incoming;
+        incoming.reserve(ls.request_use.size());
+        for (int32_t expert = 0; expert < (int32_t) ls.request_use.size(); ++expert) {
+            if (ls.expert_slot[expert] < 0 && ls.request_use[expert] > 0) {
+                incoming.push_back(expert);
+            }
         }
-
-        int budget = mc->max_inserts;
-        for (auto it = ls.pending.rbegin(); it != ls.pending.rend() && budget > 0; ++it, --budget) {
-            const int32_t id = *it;
-            if (ls.expert_slot[id] >= 0) {
-                continue;
+        std::sort(incoming.begin(), incoming.end(), [&](int32_t a, int32_t b) {
+            if (ls.request_use[a] != ls.request_use[b]) {
+                return ls.request_use[a] > ls.request_use[b];
             }
+            return a < b;
+        });
 
-            // victim: an empty non-in-flight slot if any, else the LRU non-in-flight slot
-            int32_t slot = -1;
-            uint64_t best = UINT64_MAX;
-            for (int32_t s = 0; s < mc->n_slots; ++s) {
-                if (ls.slot_in_flight[s]) {
-                    continue;
+        std::vector<int32_t> victims(mc->n_slots);
+        for (int32_t slot = 0; slot < mc->n_slots; ++slot) {
+            victims[slot] = slot;
+        }
+        std::sort(victims.begin(), victims.end(), [&](int32_t a, int32_t b) {
+            const int32_t expert_a = ls.slot_expert[a];
+            const int32_t expert_b = ls.slot_expert[b];
+            if (expert_a < 0 || expert_b < 0) {
+                if (expert_a < 0 && expert_b < 0) {
+                    return a < b;
                 }
-                if (ls.slot_expert[s] < 0) { slot = s; break; }
-                if (ls.slot_last_use[s] < best) { best = ls.slot_last_use[s]; slot = s; }
+                return expert_a < 0;
             }
-            if (slot < 0) {
-                break; // every slot is in flight; try again next step
+            if (ls.request_use[expert_a] != ls.request_use[expert_b]) {
+                return ls.request_use[expert_a] < ls.request_use[expert_b];
             }
+            return a < b;
+        });
 
+        const size_t n_replace = std::min(incoming.size(), victims.size());
+        for (size_t i = 0; i < n_replace; ++i) {
+            const int32_t expert = incoming[i];
+            const int32_t slot   = victims[i];
             const int32_t victim = ls.slot_expert[slot];
+            if (victim >= 0 && ls.request_use[expert] <= ls.request_use[victim]) {
+                break;
+            }
             if (victim >= 0) {
                 ls.expert_slot[victim] = -1;
                 ls.slot_expert[slot]   = -1;
                 set_table_entry(ls.pub, victim, mc->n_slots);
             }
-            ls.slot_in_flight[slot] = true;
 
-            std::lock_guard<std::mutex> wlk(mc->wmtx);
-            mc->todo.push_back({li, id, slot});
+            upload_slice(ls.pub.up_c,   ls.pub.up_src,   expert, slot);
+            upload_slice(ls.pub.gate_c, ls.pub.gate_src, expert, slot);
+            upload_slice(ls.pub.down_c, ls.pub.down_src, expert, slot);
+
+            ls.slot_expert[slot]   = expert;
+            ls.expert_slot[expert] = slot;
+            set_table_entry(ls.pub, expert, slot);
         }
-        ls.pending.clear();
+        std::fill(ls.request_use.begin(), ls.request_use.end(), 0);
     }
-    mc->wcv.notify_one();
 }

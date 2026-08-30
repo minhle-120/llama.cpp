@@ -2544,9 +2544,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_MOE_EXPERT_CACHE"));
     add_opt(common_arg(
         {"--moe-expert-cache-inserts"}, "N",
-        string_format("max expert uploads per layer per decode step for the MoE expert cache (default: %d)", params.n_moe_cache_inserts),
+        "deprecated and ignored; the MoE expert cache applies all beneficial replacements at request end",
         [](common_params & params, int value) {
-            params.n_moe_cache_inserts = value;
+            GGML_UNUSED(params);
+            GGML_UNUSED(value);
+            LOG_WRN("DEPRECATED: --moe-expert-cache-inserts is ignored\n");
         }
     ).set_env("LLAMA_ARG_MOE_EXPERT_CACHE_INSERTS"));
     if (ex == LLAMA_EXAMPLE_SERVER) {

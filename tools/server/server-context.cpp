@@ -560,6 +560,7 @@ struct server_slot {
                 SLT_INF(*this, "moe cache: layers = %d, slots = %d, hits = %" PRIu64 ", misses = %" PRIu64 ", hit rate = %.1f%% (request)\n",
                         moe_cache.n_layers, moe_cache.n_slots, n_hit, n_miss,
                         total > 0 ? 100.0*n_hit/total : 0.0);
+                llama_moe_cache_end_generation();
             }
 
             t_last_used = ggml_time_us();
@@ -3856,6 +3857,7 @@ private:
             if (slot.stats.n_gen == 1) {
                 slot.moe_cache_start   = llama_moe_cache_get_stats();
                 slot.moe_cache_started = true;
+                llama_moe_cache_begin_generation();
                 slot.stats.update_prompt_last();
                 slot.t_print_last = t_now;
                 slot.n_gen_last = 0;
@@ -4001,6 +4003,7 @@ private:
                 if (slot.stats.n_gen == 1) {
                     slot.moe_cache_start   = llama_moe_cache_get_stats();
                     slot.moe_cache_started = true;
+                    llama_moe_cache_begin_generation();
                 }
 
                 if (!process_token(result, slot)) {
