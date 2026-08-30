@@ -2389,7 +2389,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 case GGML_GLU_OP_GEGLU_ERF:
                 case GGML_GLU_OP_GEGLU_QUICK:
                     {
-                        n_tasks = n_threads;
+                        n_tasks = node->src[2] ? 1 : n_threads;
                     } break;
                 default:
                     GGML_ABORT("fatal error");

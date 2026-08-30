@@ -2227,6 +2227,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
             if (has_gate) {
                 cur = ggml_swiglu_split(ctx0, cur, up);
+                if (mcache) {
+                    cur->src[2] = mcache->host_table;
+                    cur->src[3] = selected_experts;
+                    ggml_set_op_params_i32(cur, 2, mcache->n_slots);
+                }
                 cb(cur, "ffn_moe_swiglu", il);
             } else {
                 cur = ggml_silu(ctx0, cur);

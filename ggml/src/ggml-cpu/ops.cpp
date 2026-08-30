@@ -3175,6 +3175,23 @@ static void ggml_compute_forward_geglu(
 
 // ggml_compute_forward_swiglu
 
+static bool ggml_swiglu_moe_row_is_cached(const ggml_tensor * dst, int64_t row) {
+    const ggml_tensor * moe_tbl = dst->src[2];
+    if (!moe_tbl) {
+        return false;
+    }
+
+    const ggml_tensor * ids = dst->src[3];
+    GGML_ASSERT(ids && ids->type == GGML_TYPE_I32 && moe_tbl->type == GGML_TYPE_I32);
+    const int64_t id = row % ids->ne[0];
+    const int64_t iid1 = row / ids->ne[0];
+    GGML_ASSERT(iid1 < ids->ne[1]);
+    const int32_t i02 = *(const int32_t *) ((const char *) ids->data + iid1*ids->nb[1] + id*ids->nb[0]);
+    GGML_ASSERT(i02 >= 0 && i02 < ggml_nelements(moe_tbl));
+    const int32_t slot = *(const int32_t *) ((const char *) moe_tbl->data + i02*moe_tbl->nb[0]);
+    return slot != ggml_get_op_params_i32(dst, 2);
+}
+
 static void ggml_compute_forward_swiglu_f32(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
@@ -3213,6 +3230,10 @@ static void ggml_compute_forward_swiglu_f32(
     const int ir1 = MIN(ir0 + dr, nr);
 
     for (int i1 = ir0; i1 < ir1; i1++) {
+        if (ggml_swiglu_moe_row_is_cached(dst, i1)) {
+            continue;
+        }
+
         float * src0_p = (float *) (src0_d + i1*src0_o);
         float * src1_p = (float *) (src1_d + i1*src1_o);
 
@@ -3272,6 +3293,10 @@ static void ggml_compute_forward_swiglu_f16(
     const int ir1 = MIN(ir0 + dr, nr);
 
     for (int i1 = ir0; i1 < ir1; i1++) {
+        if (ggml_swiglu_moe_row_is_cached(dst, i1)) {
+            continue;
+        }
+
         ggml_fp16_t * src0_p = (ggml_fp16_t *) (src0_d + i1*src0_o);
         ggml_fp16_t * src1_p = (ggml_fp16_t *) (src1_d + i1*src1_o);
 
