@@ -41,21 +41,18 @@ static __global__ void mm_ids_helper(
     if constexpr (n_expert_used_template == 0) {
         // Generic implementation:
         for (int it = 0; it < n_tokens; ++it) {
-            int iex_used = -1; // The index at which the expert is used, if any.
-            for (int iex = threadIdx.x; iex < n_expert_used; iex += warp_size) {
-                const int expert_used = ids[it*si1 + iex];
+            for (int iex0 = 0; iex0 < n_expert_used; iex0 += warp_size) {
+                const int iex = iex0 + threadIdx.x;
+                const int expert_used = iex < n_expert_used ? ids[it*si1 + iex] : INT_MAX;
+                const int is_match = expert_used == expert;
+                const int match_prefix = warp_prefix_inclusive_sum<int, warp_size>(is_match);
+                const int n_matches = __shfl_sync(0xFFFFFFFF, match_prefix, warp_size - 1, warp_size);
+
                 nex_prev += expert_used < expert;
-                if (expert_used == expert) {
-                    iex_used = iex;
+                if (is_match) {
+                    store[it_compact + match_prefix - 1] = mm_ids_helper_store(it, iex);
                 }
-            }
-
-            if (iex_used != -1) {
-                store[it_compact] = mm_ids_helper_store(it, iex_used);
-            }
-
-            if (warp_reduce_any<warp_size>(iex_used != -1)) {
-                it_compact++;
+                it_compact += n_matches;
             }
         }
     } else {
@@ -71,8 +68,8 @@ static __global__ void mm_ids_helper(
             const int iex_used = expert_used == expert ? iex : -1;
             nex_prev += expert_used < expert;
 
-            // Whether the threads at this token position have used the expert:
-            const int it_compact_add_self = warp_reduce_any<neu_padded>(iex_used != -1);
+            const int match_prefix = warp_prefix_inclusive_sum<int, neu_padded>(iex_used != -1);
+            const int it_compact_add_self = __shfl_sync(0xFFFFFFFF, match_prefix, neu_padded - 1, neu_padded);
 
             // Do a scan over threads at lower token positions in warp to get the correct index for writing data:
             int it_compact_add_lower = 0;
@@ -85,7 +82,7 @@ static __global__ void mm_ids_helper(
             }
 
             if (iex_used != -1) {
-                store[it_compact + it_compact_add_lower] = mm_ids_helper_store(it, iex_used);
+                store[it_compact + it_compact_add_lower + match_prefix - 1] = mm_ids_helper_store(it, iex_used);
             }
 
             // The thread with the highest index in the warp always has the sum over the whole warp, use it to increment all threads:
@@ -134,7 +131,7 @@ static void launch_mm_ids_helper(
 
     const dim3 num_blocks(n_experts, 1, 1);
     const dim3 block_size(warp_size, 1, 1);
-    const size_t nbytes_shared = n_tokens*sizeof(mm_ids_helper_store);
+    const size_t nbytes_shared = n_tokens*n_expert_used_var*sizeof(mm_ids_helper_store);
     GGML_ASSERT(nbytes_shared <= smpbo);
     mm_ids_helper<n_expert_used_template><<<num_blocks, block_size, nbytes_shared, stream>>>
         (ids, ids_src1, ids_dst, expert_bounds, n_tokens, n_expert_used_var, nchannels_y, si1, sis1, write_inverse);
