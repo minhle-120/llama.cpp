@@ -1222,17 +1222,28 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
 
     LLAMA_LOG_DEBUG("%s: seq_id = %d, sampler = %p\n", __func__, (int) seq_id, (void *) sampler);
 
+    // backend sampling needs unsplit logits. Under SPLIT_MODE_TENSOR that holds only
+    // when the output head is mirrored (LLAMA_META_MIRROR_OUTPUT=1): every device then
+    // holds full logits and the sampler graph runs replicated on all of them.
     if (sampler && model.split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
-        static bool warned = false;
-        if (!warned) {
-            LLAMA_LOG_WARN("%s: backend sampling not supported with SPLIT_MODE_TENSOR; using CPU\n", __func__);
-            warned = true;
+        const ggml_tensor * out_w = model.output ? model.output : model.tok_embd;
+        // the ggml callback signature takes a mutable userdata pointer, but the callback only reads it
+        auto * split_state_ud = const_cast<llama_meta_device_get_split_state_userdata *>(&model.get_split_state_ud);
+        const bool mirrored = out_w != nullptr &&
+            llama_meta_device_get_split_state(out_w, split_state_ud).axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED;
+        if (!mirrored) {
+            static bool warned = false;
+            if (!warned) {
+                LLAMA_LOG_WARN("%s: backend sampling with SPLIT_MODE_TENSOR needs a mirrored output head "
+                        "(LLAMA_META_MIRROR_OUTPUT=1); using CPU\n", __func__);
+                warned = true;
+            }
+            if (sampling.samplers.count(seq_id) > 0) {
+                sched_need_reserve = true;
+            }
+            sampling.samplers.erase(seq_id);
+            return false;
         }
-        if (sampling.samplers.count(seq_id) > 0) {
-            sched_need_reserve = true;
-        }
-        sampling.samplers.erase(seq_id);
-        return false;
     }
 
     const bool can_offload =
