@@ -117,6 +117,7 @@ llama_context::llama_context(
     cparams.embeddings              = params.embeddings;
     cparams.embeddings_nextn        = false;
     cparams.embeddings_nextn_masked = false;
+    cparams.mtp_chain               = false;
     cparams.offload_kqv             = params.offload_kqv;
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
@@ -1190,6 +1191,10 @@ void llama_context::set_nextn_layer_offset(int32_t offset) {
     cparams.nextn_layer_offset = offset;
 }
 
+void llama_context::set_mtp_chain(bool value) {
+    cparams.mtp_chain = value;
+}
+
 void llama_context::set_causal_attn(bool value) {
     LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
 
@@ -1892,7 +1897,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
             if (n_outputs) {
                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits.size);
-                ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+                // graphs can emit narrower per-row outputs than n_vocab (e.g. the
+                // MTP chain packs [token id, top prob] rows); copy what exists
+                const size_t nbytes = std::min<size_t>(ggml_nbytes(t_logits), (size_t) n_outputs*n_vocab*sizeof(float));
+                ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, nbytes);
             }
         }
 
@@ -3905,6 +3913,10 @@ void llama_set_embeddings_layer_inp(llama_context * ctx, uint32_t lid, bool valu
 
 void llama_set_nextn_layer_offset(llama_context * ctx, int32_t offset) {
     ctx->set_nextn_layer_offset(offset);
+}
+
+void llama_set_mtp_chain(llama_context * ctx, bool value) {
+    ctx->set_mtp_chain(value);
 }
 
 llama_memory_t llama_get_memory(const struct llama_context * ctx) {
