@@ -1806,7 +1806,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 }
             }
 
-            if (n_seq_drafting == 1) {
+            if (n_seq_drafting == 1 && n_cap[seq_one] > 1) {
                 auto & dp = dparams[seq_one];
                 auto * smpl = smpls[seq_one].get();
                 common_sampler_reset(smpl);
