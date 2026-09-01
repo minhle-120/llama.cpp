@@ -1634,20 +1634,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
 
-        // Rewind the draft before queueing new rows. The server can reuse a shorter
-        // prompt even when there are no deferred rows left to mark the rewind.
-        if (defer_enabled) {
-            auto * mem_dft = llama_get_memory(ctx_dft);
+        // deferred rows at or past the incoming batch positions are stale: either a
+        // new prompt rewound the sequence, or they hold candidates a later verify
+        // rejected. Drop them and clear matching draft cells before any decode.
+        if (defer_enabled && !defer.tok.empty()) {
             for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
                 if (i_batch_beg[seq_id] < 0) {
                     continue;
                 }
                 const llama_pos pos_min_in = batch_in.pos[i_batch_beg[seq_id]];
-                drop_deferred_from(seq_id, pos_min_in);
-                if (llama_memory_seq_pos_max(mem_dft, seq_id) >= pos_min_in &&
-                    !llama_memory_seq_rm(mem_dft, seq_id, pos_min_in, -1)) {
-                    SPC_ERR("failed to rewind draft sequence %d from position %d\n", (int) seq_id, (int) pos_min_in);
-                    return false;
+                if (drop_deferred_from(seq_id, pos_min_in)) {
+                    llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, pos_min_in, -1);
                 }
             }
         }
