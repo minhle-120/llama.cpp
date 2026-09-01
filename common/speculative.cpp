@@ -2076,6 +2076,111 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         const size_t row_bytes = (size_t) n_embd * sizeof(float);
         std::memcpy(pending_h[seq_id].data(), verify_h[seq_id].data() + (size_t) i_h * n_embd, row_bytes);
     }
+
+    bool get_state(llama_seq_id seq_id, std::vector<uint8_t> & data) const override {
+        if (!defer_enabled || seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return false;
+        }
+
+        struct state_header {
+            uint32_t magic;
+            uint32_t version;
+            uint32_t n_embd;
+            uint32_t n_defer;
+        };
+
+        uint32_t n_defer = 0;
+        for (llama_seq_id id : defer.seq) {
+            n_defer += id == seq_id;
+        }
+
+        const state_header header = { 0x4d545031, 1, (uint32_t) n_embd, n_defer };
+
+        data.clear();
+        data.reserve(sizeof(header) + (size_t) (1 + n_defer) * n_embd * sizeof(float) +
+                (size_t) n_defer * (sizeof(llama_token) + sizeof(llama_pos)));
+
+        auto append = [&](const void * src, size_t size) {
+            const size_t offset = data.size();
+            data.resize(offset + size);
+            std::memcpy(data.data() + offset, src, size);
+        };
+
+        append(&header, sizeof(header));
+        append(pending_h[seq_id].data(), (size_t) n_embd * sizeof(float));
+
+        for (size_t k = 0; k < defer.tok.size(); ++k) {
+            if (defer.seq[k] != seq_id) {
+                continue;
+            }
+            append(&defer.tok[k], sizeof(defer.tok[k]));
+            append(&defer.pos[k], sizeof(defer.pos[k]));
+            append(defer.embd.data() + k * (size_t) n_embd, (size_t) n_embd * sizeof(float));
+        }
+
+        return true;
+    }
+
+    void set_state(llama_seq_id seq_id, const std::vector<uint8_t> & data) override {
+        if (!defer_enabled || seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+            return;
+        }
+
+        struct state_header {
+            uint32_t magic;
+            uint32_t version;
+            uint32_t n_embd;
+            uint32_t n_defer;
+        } header;
+
+        size_t offset = 0;
+        auto read = [&](void * dst, size_t size) {
+            if (offset > data.size() || size > data.size() - offset) {
+                return false;
+            }
+            std::memcpy(dst, data.data() + offset, size);
+            offset += size;
+            return true;
+        };
+
+        if (!read(&header, sizeof(header)) ||
+            header.magic != 0x4d545031 || header.version != 1 ||
+            header.n_embd != (uint32_t) n_embd || header.n_defer > (uint32_t) defer_max) {
+            return;
+        }
+
+        std::vector<float> pending((size_t) n_embd);
+        std::vector<llama_token> tok(header.n_defer);
+        std::vector<llama_pos> pos(header.n_defer);
+        std::vector<float> embd((size_t) header.n_defer * n_embd);
+
+        if (!read(pending.data(), pending.size() * sizeof(float))) {
+            return;
+        }
+        for (uint32_t k = 0; k < header.n_defer; ++k) {
+            if (!read(&tok[k], sizeof(tok[k])) ||
+                !read(&pos[k], sizeof(pos[k])) ||
+                !read(embd.data() + (size_t) k * n_embd, (size_t) n_embd * sizeof(float))) {
+                return;
+            }
+        }
+        if (offset != data.size()) {
+            return;
+        }
+
+        pending_h[seq_id] = std::move(pending);
+        drop_deferred_from(seq_id, 0);
+
+        const size_t k0 = defer.tok.size();
+        defer.tok.resize(k0 + header.n_defer);
+        defer.pos.resize(k0 + header.n_defer);
+        defer.seq.resize(k0 + header.n_defer, seq_id);
+        defer.embd.resize((k0 + header.n_defer) * (size_t) n_embd);
+
+        std::copy(tok.begin(), tok.end(), defer.tok.begin() + k0);
+        std::copy(pos.begin(), pos.end(), defer.pos.begin() + k0);
+        std::memcpy(defer.embd.data() + k0 * (size_t) n_embd, embd.data(), embd.size() * sizeof(float));
+    }
 };
 
 // state of self-speculation (simple implementation, not ngram-map)
