@@ -303,13 +303,15 @@ struct server_slot {
 
         const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         const size_t cur_size_dft = ctx_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
+        std::vector<uint8_t> state_spec;
+        common_speculative_get_state(spec, id, state_spec);
 
-        const size_t cur_size = cur_size_tgt + cur_size_dft;
+        const size_t cur_size = cur_size_tgt + cur_size_dft + state_spec.size();
 
         SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB)\n",
                 (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0));
 
-        auto * cur = prompt_cache.alloc(prompt, cur_size_tgt, cur_size_dft);
+        auto * cur = prompt_cache.alloc(prompt, cur_size_tgt, cur_size_dft, state_spec.size());
         if (cur == nullptr) {
             return false;
         }
@@ -318,14 +320,20 @@ struct server_slot {
         if (ctx_dft) {
             llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         }
+        if (!state_spec.empty()) {
+            std::memcpy(cur->data.spec.data(), state_spec.data(), state_spec.size());
+        }
 
         return true;
     }
 
     bool prompt_load(server_prompt_cache & prompt_cache, const server_tokens & tokens) {
-        bool res = prompt_cache.load(prompt, tokens, ctx_tgt, ctx_dft, id);
+        std::vector<uint8_t> state_spec;
+        bool res = prompt_cache.load(prompt, state_spec, tokens, ctx_tgt, ctx_dft, id);
         if (!res) {
             SLT_WRN(*this, "%s", "failed to load prompt from cache\n");
+        } else if (!state_spec.empty()) {
+            common_speculative_set_state(spec, id, state_spec);
         }
 
         return res;
