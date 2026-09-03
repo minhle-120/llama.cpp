@@ -1573,6 +1573,30 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         return dropped;
     }
 
+    void drop_deferred_through(llama_seq_id seq_id, llama_pos pos_last) {
+        const size_t row_bytes = (size_t) n_embd * sizeof(float);
+
+        size_t w = 0;
+        for (size_t k = 0; k < defer.tok.size(); ++k) {
+            if (defer.seq[k] == seq_id && defer.pos[k] <= pos_last) {
+                continue;
+            }
+            if (w != k) {
+                defer.tok[w] = defer.tok[k];
+                defer.pos[w] = defer.pos[k];
+                defer.seq[w] = defer.seq[k];
+                std::memmove(defer.embd.data() + w * (size_t) n_embd,
+                             defer.embd.data() + k * (size_t) n_embd, row_bytes);
+            }
+            w++;
+        }
+
+        defer.tok.resize(w);
+        defer.pos.resize(w);
+        defer.seq.resize(w);
+        defer.embd.resize(w * (size_t) n_embd);
+    }
+
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
         // note: the server calls begin() after the prefill decode, so stale defer
         // rows are already handled by the position-rewind trim in process(). Rows
@@ -1816,6 +1840,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                 // deferred rows at or past n_past hold candidates the verify
                 // rejected; the committed prefix ends at n_past - 1. Drop them.
                 drop_deferred_from(seq_one, dp.n_past);
+
+                // Prompt-cache restore can leave deferred rows that are already in the draft memory.
+                const llama_pos pos_max_dft = llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_one);
+                drop_deferred_through(seq_one, pos_max_dft);
 
                 // rows of other sequences cannot join a single-sequence chain
                 // batch; decode all remaining rows standalone in that case
